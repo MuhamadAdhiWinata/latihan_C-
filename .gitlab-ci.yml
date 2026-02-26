@@ -1,0 +1,134 @@
+variables:
+  PROJECT: Integral.Api
+  SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+  ORGANIZATION_KEY: "sis5253935"
+  GIT_DEPTH: "0"
+  DOCKER_CLIENT_TIMEOUT: 300
+  COMPOSE_HTTP_TIMEOUT: 300
+  MAX_RETRIES: 5
+  RETRY_DELAY: 15
+
+stages:
+  - test
+  - build
+  - deploy
+
+sonarqube-check:
+  stage: test
+  image:
+    name: mcr.microsoft.com/dotnet/sdk:10.0
+    pull_policy: always
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+    GIT_DEPTH: "0"
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script:
+    - "apt-get update"
+    - "apt-get install --yes openjdk-17-jre"
+    - "dotnet tool install --global dotnet-sonarscanner"
+    - "export PATH=\"$PATH:$HOME/.dotnet/tools\""
+
+    - |
+      dotnet sonarscanner begin \
+          /k:"sis5253935_merger-integral" \
+          /o:"$ORGANIZATION_KEY" \
+          /d:sonar.token="$SONAR_TOKEN" \
+          /d:sonar.host.url="$SONAR_HOST_URL" 
+
+    - "dotnet build"
+    - "dotnet sonarscanner end /d:sonar.token=\"$SONAR_TOKEN\""
+  allow_failure: true
+  only:
+    - merge_requests
+    - main
+    - dev
+
+docker-build:
+  image: docker:cli
+  stage: build
+  needs: [ ]
+  services:
+    - docker:dind
+  variables:
+    DOCKER_IMAGE_NAME: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      variables:
+        IMAGE_TAG: "main"
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      variables:
+        IMAGE_TAG: "dev"
+    - when: never
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+  script:
+    - docker build --pull -t "$DOCKER_IMAGE_NAME" -f "$PROJECT/Dockerfile" .
+    - docker push "$DOCKER_IMAGE_NAME"
+
+    - |
+      if [[ "$CI_COMMIT_BRANCH" == "main" ]]; then
+        docker tag "$DOCKER_IMAGE_NAME" "$CI_REGISTRY_IMAGE:$IMAGE_TAG"
+        docker push "$CI_REGISTRY_IMAGE:$IMAGE_TAG"
+        docker tag "$DOCKER_IMAGE_NAME" "$CI_REGISTRY_IMAGE:latest"
+        docker push "$CI_REGISTRY_IMAGE:latest"
+      
+      else
+        docker tag "$DOCKER_IMAGE_NAME" "$CI_REGISTRY_IMAGE:$IMAGE_TAG"
+        docker push "$CI_REGISTRY_IMAGE:$IMAGE_TAG"
+      fi
+      
+docker-deploy:
+  stage: deploy
+  needs:
+    - docker-build
+  tags:
+    - "prod"
+    - "dev"
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      variables:
+        ENVIRONMENT: "Production"
+        PORT: 5080
+        IMAGE_TAG: "main"
+        CONTAINER_NAME: integral-api-prod
+        
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      variables:
+        ENVIRONMENT: "Development"
+        PORT: 5000
+        IMAGE_TAG: "dev"
+        CONTAINER_NAME: integral-api-dev
+    - when: never
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login --username "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - echo "Deploying $CI_COMMIT_BRANCH with ENV=$ENVIRONMENT and tag=$IMAGE_TAG"
+
+    - |
+      n=0
+      until [ "$n" -ge "$MAX_RETRIES" ]; do
+        docker pull "$CI_REGISTRY_IMAGE:$IMAGE_TAG" && break
+        n=$((n+1))
+        echo "Docker pull failed ($n/$MAX_RETRIES). Retrying in $RETRY_DELAY seconds"
+        sleep $RETRY_DELAY
+      done
+
+      if [ "$n" -ge "$MAX_RETRIES" ]; then
+        echo "Failed to pull image after $MAX_RETRIES attempts. Exiting"
+        exit 1
+      fi
+
+    - docker stop $CONTAINER_NAME || true
+    - docker rm $CONTAINER_NAME || true
+    - |
+      docker run -d \
+        --name $CONTAINER_NAME \
+        --restart unless-stopped \
+        -e ASPNETCORE_ENVIRONMENT=$ENVIRONMENT \
+        -p $PORT:8080 \
+        $CI_REGISTRY_IMAGE:$IMAGE_TAG
+    

@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/.solutionfiles/">
+    <File Path=".dockerignore" />
+    <File Path=".gitignore" />
+    <File Path=".gitlab-ci.yml" />
+    <File Path="compose.yaml" />
+    <File Path="Directory.Packages.props" />
+  </Folder>
+  <Project Path="Integral.Api/Integral.Api.csproj" />
+  <Project Path="SharedKernel/SharedKernel.csproj" />
+</Solution>

@@ -1,0 +1,6 @@
+﻿services:
+  integral.api:
+    image: integral.api
+    build:
+      context: .
+      dockerfile: Integral.Api/Dockerfile
